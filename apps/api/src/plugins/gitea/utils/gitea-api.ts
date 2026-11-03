@@ -339,19 +339,23 @@ export function createGiteaClient(
       repositoryOwner: string,
       repositoryName: string,
     ): Promise<GiteaLabel[]> {
-      const labels = await giteaFetch<GiteaLabel[]>(
-        baseUrl,
-        accessToken,
-        `${owner(repositoryOwner, repositoryName)}/labels`,
-      );
-      if (!labels) {
-        throw new GiteaApiError(
-          "Gitea labels response was empty",
-          500,
-          "EMPTY_RESPONSE",
+      const labels: GiteaLabel[] = [];
+      for (let page = 1; ; page++) {
+        const batch = await giteaFetch<GiteaLabel[]>(
+          baseUrl,
+          accessToken,
+          `${owner(repositoryOwner, repositoryName)}/labels?page=${page}&limit=50`,
         );
+        if (!batch) {
+          throw new GiteaApiError(
+            "Gitea labels response was empty",
+            500,
+            "EMPTY_RESPONSE",
+          );
+        }
+        if (batch.length === 0) return labels;
+        labels.push(...batch);
       }
-      return labels;
     },
 
     async createLabel(
