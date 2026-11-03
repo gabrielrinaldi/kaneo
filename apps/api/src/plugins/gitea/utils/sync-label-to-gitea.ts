@@ -1,10 +1,14 @@
-import { dispatchIssueWrite } from "../../sync/dispatch-issue-write";
+import {
+  createIssueWrite,
+  dispatchIssueWrite,
+} from "../../sync/dispatch-issue-write";
 import { canSyncTask } from "../../sync/eligibility";
 import { eq } from "drizzle-orm";
 import db from "../../../database";
 import { externalLinkTable } from "../../../database/schema";
 import type { GiteaConfig } from "../config";
 import { createGiteaClient } from "./gitea-api";
+import { labelIdsByName, removeLabelGitea } from "./labels";
 
 const namedColorToHex: Record<string, string> = {
   red: "EF4444",
@@ -116,7 +120,8 @@ export async function syncLabelToGitea(
     config.repositoryOwner,
     config.repositoryName,
   );
-  let label = labels.find((l) => l.name === labelName);
+  const existingId = labelIdsByName(labels).get(labelName);
+  let label = labels.find((l) => l.id === existingId);
 
   if (!label) {
     try {
@@ -145,8 +150,7 @@ export async function syncLabelToGitea(
       config.repositoryName,
       issueNumber,
     );
-    const existingIds = (issue.labels ?? []).map((l) => l.id);
-    if (existingIds.includes(label.id)) {
+    if ((issue.labels ?? []).some((l) => l.name === labelName)) {
       return;
     }
     const labelId = label.id;
@@ -167,28 +171,10 @@ export async function removeLabelFromGitea(taskId: string, labelName: string) {
   const ctx = await getGiteaIssueContext(taskId);
   if (!ctx) return;
 
-  const { client, config, issueNumber } = ctx;
-
-  const labels = await client.listLabels(
-    config.repositoryOwner,
-    config.repositoryName,
+  await removeLabelGitea(
+    ctx.config,
+    ctx.issueNumber,
+    labelName,
+    createIssueWrite(ctx.externalLink, ctx.expectedConfig),
   );
-  const label = labels.find((l) => l.name === labelName);
-  if (!label) return;
-
-  try {
-    await dispatchIssueWrite(ctx.externalLink, ctx.expectedConfig, () =>
-      client.removeLabelFromIssue(
-        config.repositoryOwner,
-        config.repositoryName,
-        issueNumber,
-        label.id,
-      ),
-    );
-  } catch (error) {
-    console.error(
-      `Failed to remove label "${labelName}" from Gitea issue:`,
-      error,
-    );
-  }
 }

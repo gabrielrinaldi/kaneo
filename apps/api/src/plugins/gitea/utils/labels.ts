@@ -19,11 +19,49 @@ function getLabelColor(labelName: string): string {
   return labelColors[labelName] || "6B7280";
 }
 
-export async function ensureLabelsExistGitea(
+export function labelIdsByName(labels: GiteaLabel[]): Map<string, number> {
+  const ids = new Map<string, number>();
+  for (const { name, id } of labels) {
+    const known = ids.get(name);
+    if (known === undefined || id < known) ids.set(name, id);
+  }
+  return ids;
+}
+
+const repositoryQueues = new Map<string, Promise<unknown>>();
+
+function inRepositoryQueue<T>(
+  config: GiteaConfig,
+  run: () => Promise<T>,
+): Promise<T> {
+  const key = `${config.baseUrl}|${config.repositoryOwner}/${config.repositoryName}`;
+  const result = (repositoryQueues.get(key) ?? Promise.resolve()).then(
+    run,
+    run,
+  );
+  repositoryQueues.set(
+    key,
+    result.catch(() => {}),
+  );
+  return result;
+}
+
+export function ensureLabelsExistGitea(
   config: GiteaConfig,
   labels: string[],
   requireSuccess = false,
   write: IssueWrite = (send) => send(),
+): Promise<Map<string, number>> {
+  return inRepositoryQueue(config, () =>
+    ensureLabels(config, labels, requireSuccess, write),
+  );
+}
+
+async function ensureLabels(
+  config: GiteaConfig,
+  labels: string[],
+  requireSuccess: boolean,
+  write: IssueWrite,
 ): Promise<Map<string, number>> {
   const client = createGiteaClient(config);
   const map = new Map<string, number>();
@@ -42,7 +80,7 @@ export async function ensureLabelsExistGitea(
     return map;
   }
 
-  const nameToId = new Map(existingLabels.map((l) => [l.name, l.id]));
+  const nameToId = labelIdsByName(existingLabels);
 
   for (const name of labels) {
     try {
@@ -75,14 +113,26 @@ export async function addLabelsToIssueGitea(
 ) {
   if (labelNames.length === 0) return;
 
+  const client = createGiteaClient(config);
+  let carried: string[];
+  try {
+    carried = await issueLabelNames(client, config, issueIndex);
+  } catch (error) {
+    if (requireSuccess) throw error;
+    console.error("Failed to read Gitea issue labels:", error);
+    return;
+  }
+  const missing = labelNames.filter((name) => !carried.includes(name));
+  if (missing.length === 0) return;
+
   const nameToId = await ensureLabelsExistGitea(
     config,
-    labelNames,
+    missing,
     requireSuccess,
     write,
   );
   const ids: number[] = [];
-  for (const name of labelNames) {
+  for (const name of missing) {
     const id = nameToId.get(name);
     if (id !== undefined) {
       ids.push(id);
@@ -90,8 +140,6 @@ export async function addLabelsToIssueGitea(
   }
 
   if (ids.length === 0) return;
-
-  const client = createGiteaClient(config);
 
   try {
     await write(() =>
@@ -108,6 +156,19 @@ export async function addLabelsToIssueGitea(
   }
 }
 
+async function issueLabelNames(
+  client: ReturnType<typeof createGiteaClient>,
+  config: GiteaConfig,
+  issueIndex: number,
+) {
+  const issue = await client.getIssue(
+    config.repositoryOwner,
+    config.repositoryName,
+    issueIndex,
+  );
+  return (issue.labels ?? []).map((l) => l.name);
+}
+
 export async function removeLabelGitea(
   config: GiteaConfig,
   issueIndex: number,
@@ -118,13 +179,15 @@ export async function removeLabelGitea(
   const client = createGiteaClient(config);
   let labels: GiteaLabel[];
   try {
-    labels = await client.listLabels(
+    const issue = await client.getIssue(
       config.repositoryOwner,
       config.repositoryName,
+      issueIndex,
     );
+    labels = (issue.labels ?? []).filter((l) => l.name === labelName);
   } catch (error) {
     if (requireSuccess) throw error;
-    console.error("Failed to list Gitea labels for removal:", {
+    console.error("Failed to read Gitea issue labels for removal:", {
       repositoryOwner: config.repositoryOwner,
       repositoryName: config.repositoryName,
       issueIndex,
@@ -134,27 +197,26 @@ export async function removeLabelGitea(
     return;
   }
 
-  const label = labels.find((l) => l.name === labelName);
-  if (!label) return;
-
-  try {
-    await write(() =>
-      client.removeLabelFromIssue(
-        config.repositoryOwner,
-        config.repositoryName,
+  for (const label of labels) {
+    try {
+      await write(() =>
+        client.removeLabelFromIssue(
+          config.repositoryOwner,
+          config.repositoryName,
+          issueIndex,
+          label.id,
+        ),
+      );
+    } catch (error) {
+      if (requireSuccess) throw error;
+      console.error("Failed to remove label from Gitea issue:", {
+        repositoryOwner: config.repositoryOwner,
+        repositoryName: config.repositoryName,
         issueIndex,
-        label.id,
-      ),
-    );
-  } catch (error) {
-    if (requireSuccess) throw error;
-    console.error("Failed to remove label from Gitea issue:", {
-      repositoryOwner: config.repositoryOwner,
-      repositoryName: config.repositoryName,
-      issueIndex,
-      labelName,
-      labelId: label.id,
-      error,
-    });
+        labelName,
+        labelId: label.id,
+        error,
+      });
+    }
   }
 }
